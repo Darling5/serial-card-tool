@@ -28,15 +28,41 @@ try:
 except ImportError:
     serial = None
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITEE_REPO = "darling5/serial-card-tool"
 GITHUB_REPO = "darling5/serial-card-tool"
+
+RESERVED_FIELDS = {"idx", "ts", "dev", "iccid", "card", "status", "device_num"}
+FIXED_COLS = ["idx", "ts", "dev", "iccid", "card", "status"]
+COL_LABELS = {"idx": "序号", "ts": "时间", "dev": "cur device_num", "iccid": "iccid",
+              "card": "卡号(144)", "status": "状态"}
+COL_WIDTHS = {"idx": 50, "ts": 90, "dev": 130, "iccid": 190, "card": 130, "status": 130}
 
 # 打包后 __file__ 指向临时解压目录，存档须落在 exe 旁边
 if getattr(sys, "frozen", False):
     APP_DIR = os.path.dirname(sys.executable)
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_PATH = os.path.join(APP_DIR, "serial_card_tool_config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return (cfg.get("custom_fields") or [], cfg.get("column_order") or [])
+    except Exception:
+        return [], []
+
+
+def save_config(fields, order):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump({"custom_fields": fields, "column_order": order},
+                      f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 # ---------------- 解析引擎（规则与离线验证版 extract_pair.py 逐条一致） ----------------
 
@@ -51,28 +77,54 @@ DEV_PREFIX = "785"
 
 
 class Record:
-    __slots__ = ("dev", "iccid", "dev_line", "iccid_line", "ts")
+    __slots__ = ("dev", "iccid", "dev_line", "iccid_line", "ts", "fields")
 
-    def __init__(self, dev, iccid, dev_line, iccid_line, ts):
+    def __init__(self, dev, iccid, dev_line, iccid_line, ts, fields=None):
         self.dev = dev
         self.iccid = iccid
         self.dev_line = dev_line
         self.iccid_line = iccid_line
         self.ts = ts
+        self.fields = fields or {}
 
 
 class ParserEngine:
-    """增量提取（devices/iccids 随行缓存）+ 全量重配对（bisect 窗口）。
-    配对结果与离线批处理版完全一致；规模 500×500 时单次重算 <5ms。"""
+    """增量提取（devices/iccids/自定义字段随行缓存）+ 全量重配对（bisect 窗口）。
+    device_num 与 iccid 双向就近配对（≤10 行，与离线验证版一致）；
+    自定义字段按"字段名:值"归属其后最近的设备行（≤10 行）。"""
 
     def __init__(self):
         self.lines = []
         self.devices = []          # (行号, 设备号)，按行号有序
         self.iccids = []           # (行号, iccid)，按行号有序
         self._pending = None       # (行号, 部分值 or None)，等下一行做续行合并
+        self.custom_fields = []    # 自定义字段名列表
+        self._field_res = {}       # 字段名 -> 编译正则
+        self.field_hits = {}       # 字段名 -> [(行号, 值)]
         self._records = []
         self._key = None
         self.version = 0
+
+    def set_fields(self, names):
+        """设置自定义字段集（去重、过滤保留名），并对已有行重扫。"""
+        names = [n for n in dict.fromkeys(names) if n and n not in RESERVED_FIELDS]
+        self.custom_fields = names
+        self._field_res = {n: re.compile(re.escape(n) + r"[:：]\s*([0-9A-Za-z_.\-]+)")
+                           for n in names}
+        self.field_hits = {n: [] for n in names}
+        for i, line in enumerate(self.lines):
+            self._scan_fields(i, line)
+        self._key = None
+        return self.repair()
+
+    def _scan_fields(self, i, line):
+        hit = False
+        for n, rx in self._field_res.items():
+            m = rx.search(line)
+            if m:
+                self.field_hits[n].append((i, m.group(1)))
+                hit = True
+        return hit
 
     def feed_lines(self, lines):
         trig = False
@@ -125,6 +177,8 @@ class ParserEngine:
         elif DEV_EMPTY_RE.search(line.strip()):
             self._pending = (idx, None)
             trig = True
+        if self._field_res and self._scan_fields(idx, line):
+            trig = True
         return trig
 
     def repair(self):
@@ -149,15 +203,27 @@ class ParserEngine:
             if dv not in dev_map:
                 dev_map[dv] = [(None, di, None)]
 
+        # 自定义字段：值归属其后最近的设备行（AT 块内字段均在 device_num 之后，≤10 行）
+        dev_lines = [di for di, _ in self.devices]
+        field_vals = {}
+        for n in self.custom_fields:
+            for h, v in self.field_hits[n]:
+                pos = bisect.bisect_right(dev_lines, h) - 1
+                if pos < 0 or h - dev_lines[pos] > PAIR_WINDOW:
+                    continue
+                field_vals.setdefault((n, dev_lines[pos]), v)
+
         records = []
         for dv, items in dev_map.items():
             first = min(di for _, di, _ in items)
             ts = self._ts_before(first)
             for iv, di, ii in items:
-                records.append(Record(dv, iv, di, ii, ts))
+                fields = {n: field_vals.get((n, di), "") for n in self.custom_fields}
+                records.append(Record(dv, iv, di, ii, ts, fields))
         records.sort(key=lambda r: (r.dev_line, r.iccid_line if r.iccid_line is not None else 0))
 
-        key = [(r.dev, r.iccid, r.dev_line, r.iccid_line) for r in records]
+        key = [(r.dev, r.iccid, r.dev_line, r.iccid_line,
+                tuple(r.fields.get(n, "") for n in self.custom_fields)) for r in records]
         if key != self._key:
             self._records = records
             self._key = key
@@ -398,6 +464,118 @@ def fetch_latest_version():
     return None
 
 
+# ---------------- 字段与列设置对话框 ----------------
+
+class FieldSettingsDialog(tk.Toplevel):
+    def __init__(self, app):
+        super().__init__(app.root)
+        self.app = app
+        self.title("字段与列设置")
+        self.transient(app.root)
+        self.resizable(False, False)
+        self._fields = list(app.custom_fields)
+        self._order = list(app.column_order)
+
+        body = ttk.Frame(self, padding=10)
+        body.pack(fill="both", expand=True)
+
+        left = ttk.LabelFrame(body, text=" 自定义提取字段（日志中“字段名:值”的前缀） ", padding=8)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.field_list = tk.Listbox(left, width=30, height=12, exportselection=False)
+        self.field_list.pack(fill="both", expand=True)
+        for f in self._fields:
+            self.field_list.insert("end", f)
+        row = ttk.Frame(left)
+        row.pack(fill="x", pady=(6, 0))
+        self.name_var = tk.StringVar()
+        ent = ttk.Entry(row, textvariable=self.name_var)
+        ent.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ent.bind("<Return>", lambda e: self._add_field())
+        ent.focus_set()
+        ttk.Button(row, text="添加", width=6, command=self._add_field).pack(side="left", padx=(0, 4))
+        ttk.Button(row, text="删除", width=6, command=self._del_field).pack(side="left")
+
+        right = ttk.LabelFrame(body, text=" 表格列顺序（选中后上移/下移） ", padding=8)
+        right.grid(row=0, column=1, sticky="nsew")
+        self.col_list = tk.Listbox(right, width=30, height=12, exportselection=False)
+        self.col_list.pack(fill="both", expand=True)
+        row = ttk.Frame(right)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Button(row, text="上移", width=6,
+                   command=lambda: self._move(-1)).pack(side="left", padx=(0, 4))
+        ttk.Button(row, text="下移", width=6,
+                   command=lambda: self._move(1)).pack(side="left")
+        self._refresh_cols()
+
+        btns = ttk.Frame(body)
+        btns.grid(row=1, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="应用", command=self._apply).pack(side="left", padx=4)
+        ttk.Button(btns, text="取消", command=self.destroy).pack(side="left")
+
+        self.grab_set()
+
+    def _refresh_cols(self):
+        self.col_list.delete(0, "end")
+        for k in self._order:
+            self.col_list.insert("end", COL_LABELS.get(k, k))
+
+    def _add_field(self):
+        name = self.name_var.get().strip()
+        if not name:
+            return
+        if name in RESERVED_FIELDS:
+            messagebox.showwarning("提示", "“%s”是内置字段，无需添加" % name, parent=self)
+            return
+        if any(ch in name for ch in ":："):
+            messagebox.showwarning("提示", "字段名不能包含冒号", parent=self)
+            return
+        if name in self._fields:
+            self.name_var.set("")
+            return
+        self._fields.append(name)
+        self.field_list.insert("end", name)
+        self.field_list.see("end")
+        self.name_var.set("")
+        if "status" in self._order:
+            self._order.insert(self._order.index("status"), name)
+        else:
+            self._order.append(name)
+        self._refresh_cols()
+
+    def _del_field(self):
+        sel = self.field_list.curselection()
+        if not sel:
+            return
+        name = self.field_list.get(sel[0])
+        self.field_list.delete(sel[0])
+        self._fields.remove(name)
+        if name in self._order:
+            self._order.remove(name)
+        self._refresh_cols()
+
+    def _move(self, d):
+        sel = self.col_list.curselection()
+        if not sel:
+            return
+        i = sel[0]
+        j = i + d
+        if not (0 <= j < len(self._order)):
+            return
+        self._order[i], self._order[j] = self._order[j], self._order[i]
+        self._refresh_cols()
+        self.col_list.selection_set(j)
+        self.col_list.see(j)
+
+    def _apply(self):
+        valid = set(FIXED_COLS) | set(self._fields)
+        for k in valid:
+            if k not in self._order:
+                self._order.append(k)
+        save_config(self._fields, self._order)
+        self.app._apply_field_settings(self._fields, self._order)
+        self.destroy()
+
+
 # ---------------- GUI ----------------
 
 class App:
@@ -406,7 +584,11 @@ class App:
         root.title("串口工具 · 设备号-ICCID-卡号提取")
         root.geometry("1200x800")
 
+        fields, order = load_config()
+        self.custom_fields = [f for f in fields if f and f not in RESERVED_FIELDS]
         self.engine = ParserEngine()
+        self.column_order = self._merge_order(order)
+        self.engine.set_fields(self.custom_fields)
         self.card_map = {}
         self.card_ver = 0
         self.exclusions = set()
@@ -488,6 +670,8 @@ class App:
         self.excl_label = ttk.Label(cfg, text="已识别排除：0 个", foreground="#666")
         self.excl_label.pack(anchor="w", pady=(0, 6))
 
+        ttk.Button(cfg, text="字段与列设置…",
+                   command=self._open_field_settings).pack(fill="x", pady=(0, 6))
         ttk.Button(cfg, text="清空已解析数据", command=self._clear_data).pack(fill="x")
 
         # 右：进度看板
@@ -528,16 +712,19 @@ class App:
         self.root.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
+        self.table_frame = frame
+        self._rebuild_table()
 
-        cols = ("idx", "ts", "dev", "iccid", "card", "status")
-        self.tree = ttk.Treeview(frame, columns=cols, show="headings")
-        widths = {"idx": 50, "ts": 90, "dev": 130, "iccid": 190, "card": 130, "status": 130}
+    def _rebuild_table(self):
+        for w in self.table_frame.winfo_children():
+            w.destroy()
+        cols = tuple(self.column_order)
+        self.tree = ttk.Treeview(self.table_frame, columns=cols, show="headings")
         for cid in cols:
-            self.tree.heading(cid, text={"idx": "序号", "ts": "时间", "dev": "cur device_num",
-                                         "iccid": "iccid", "card": "卡号(144)", "status": "状态"}[cid])
-            self.tree.column(cid, width=widths[cid], anchor="w",
-                             stretch=(cid in ("iccid", "status")))
-        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+            self.tree.heading(cid, text=COL_LABELS.get(cid, cid))
+            self.tree.column(cid, width=COL_WIDTHS.get(cid, 120), anchor="w",
+                             stretch=(cid in ("iccid", "status") or cid in self.custom_fields))
+        vsb = ttk.Scrollbar(self.table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
@@ -686,10 +873,31 @@ class App:
 
     def _clear_data(self):
         self.engine = ParserEngine()
+        self.engine.set_fields(self.custom_fields)
         self._shown_state = None
         self.tree.delete(*self.tree.get_children())
         self._status_text = "已清空"
         self._update_stats()
+
+    # ---- 字段与列设置 ----
+
+    def _merge_order(self, saved):
+        valid = set(FIXED_COLS) | set(self.custom_fields)
+        order = [k for k in saved if k in valid]
+        default = ["idx", "ts", "dev", "iccid", "card"] + self.custom_fields + ["status"]
+        order += [k for k in default if k not in order]
+        return order
+
+    def _open_field_settings(self):
+        FieldSettingsDialog(self)
+
+    def _apply_field_settings(self, fields, order):
+        self.custom_fields = list(fields)
+        self.column_order = list(order)
+        self.engine.set_fields(self.custom_fields)
+        self._rebuild_table()
+        self._shown_state = None
+        self._status_text = "字段设置已应用（%d 个自定义字段）" % len(self.custom_fields)
 
     # ---- 主循环 ----
 
@@ -743,6 +951,21 @@ class App:
             return self.card_map[r.iccid], "已匹配", "ok"
         return "", "旧卡/非池内", "oldcard"
 
+    def _cell_value(self, key, n, r, card, status):
+        if key == "idx":
+            return n
+        if key == "ts":
+            return r.ts or ""
+        if key == "dev":
+            return r.dev
+        if key == "iccid":
+            return r.iccid or ""
+        if key == "card":
+            return card
+        if key == "status":
+            return status
+        return r.fields.get(key, "")
+
     def _refresh_table(self):
         self.tree.delete(*self.tree.get_children())
         swap_devs = {}
@@ -752,8 +975,11 @@ class App:
         swap_devs = {d: len(v) for d, v in swap_devs.items()}
         for n, r in enumerate(self.engine.records(), 1):
             card, status, tag = self._classify(r, swap_devs)
-            self.tree.insert("", "end", iid=str(n), tags=(tag,),
-                             values=(n, r.ts or "", r.dev, r.iccid or "—", card or "—", status))
+            vals = []
+            for key in self.column_order:
+                v = self._cell_value(key, n, r, card, status)
+                vals.append(v if v != "" else "—")
+            self.tree.insert("", "end", iid=str(n), tags=(tag,), values=vals)
 
     def _update_stats(self):
         recs = self.engine.records()
@@ -818,10 +1044,11 @@ class App:
         swap_devs = {d: len(v) for d, v in swap_devs.items()}
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["序号", "时间", "cur device_num", "iccid", "卡号(144)", "状态"])
+            w.writerow([COL_LABELS.get(k, k) for k in self.column_order])
             for n, r in enumerate(self.engine.records(), 1):
                 card, status, _ = self._classify(r, swap_devs)
-                w.writerow([n, r.ts, r.dev, r.iccid or "", card, status])
+                w.writerow([self._cell_value(k, n, r, card, status)
+                            for k in self.column_order])
         messagebox.showinfo("完成", "已导出：%s" % path)
 
     def _export_missing_devices(self):

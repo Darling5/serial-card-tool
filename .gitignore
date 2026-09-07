@@ -6,6 +6,7 @@ __pycache__/
 
 # 运行时数据（含真实生产数据，严禁入库）
 serial_log/
+serial_card_tool_config.json
 device_iccid_table.*
 device_range_check.*
 device_card_detail.*

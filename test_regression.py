@@ -113,6 +113,42 @@ if POOL:
 else:
     print("[SKIP] 未提供池卡明细参数，跳过卡号匹配测试")
 
+# 6. 自定义提取字段（合成日志验证：提取/就近配对/缺失为空）
+eng3 = ParserEngine()
+syn = [
+    "[19:00:00.000]start",
+    "cur device_num:785000060001",
+    "imei:111111111111111",
+    "iccid:89860402102670000001",
+    "imsi:460001234567890",
+    "sim card type:CT_NATIONAL",
+    "cur device_num:785000060002",
+    "imei:222222222222222",
+    "iccid:89860402102670000002",
+]
+eng3.feed_lines(syn)
+eng3.flush()
+eng3.set_fields(["imei", "imsi", "sim card type"])
+recs3 = {r.dev: r for r in eng3.records()}
+check("自定义字段 imei 提取（两台）",
+      recs3["785000060001"].fields.get("imei") == "111111111111111"
+      and recs3["785000060002"].fields.get("imei") == "222222222222222")
+check("自定义字段 imsi / sim card type（601 全有，602 超窗为空）",
+      recs3["785000060001"].fields.get("imsi") == "460001234567890"
+      and recs3["785000060001"].fields.get("sim card type") == "CT_NATIONAL"
+      and recs3["785000060002"].fields.get("imsi") == "")
+
+# 7. 真实日志自定义字段规模检查（会话中途 set_fields 触发全量重扫）
+eng.set_fields(["imei", "imsi"])
+recs_f = eng.records()
+n_imei = sum(1 for r in recs_f if r.fields.get("imei"))
+n_imsi = sum(1 for r in recs_f if r.fields.get("imsi"))
+print("[INFO] 真实日志自定义字段覆盖：imei %d/%d，imsi %d/%d"
+      % (n_imei, len(recs_f), n_imsi, len(recs_f)))
+check("真实日志 imei 覆盖 ≥ 365", n_imei >= 365, "实际 %d" % n_imei)
+check("设字段后配对结果不变（369 条）",
+      sum(1 for r in recs_f if r.iccid) == 369)
+
 print()
 print("结果：%s（%d 项失败）" % ("全部通过" if fails == 0 else "存在失败", fails))
 sys.exit(1 if fails else 0)
