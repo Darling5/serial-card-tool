@@ -1,0 +1,39 @@
+# SerialCardTool 串口工具 · 设备号-ICCID-卡号提取
+
+智环未来(深圳)科技有限公司 出品
+
+面向物联网设备批量生产/烧录场景的 Windows 桌面工具，自动从串口数据或串口日志中提取
+`cur device_num` 与 `iccid` 两类信息并配对，结合运营商池卡明细表换算 144 开头卡号，
+实时显示读取进度与缺失清单。
+
+## 功能
+
+- **三数据源**：COM 口直连（pyserial）/ 导入日志 TXT 一次性解析 / 实时监听日志文件增量解析
+- **自动配对**：device_num 与 iccid 相邻 ≤10 行自动配对，处理乱码前缀（`_num:`）、行截断续行、换卡（同设备多卡全部保留）
+- **进度看板**：本次总数 / 已读 / 剩余未读取 + 配对成功、匹配卡号、读取失败、换卡、非池内卡、范围内缺失设备、池内缺失卡号
+- **卡号匹配**：导入 Excel/CSV 池卡明细（自动识别 ICCID/卡号列），支持 ICCID 排除清单
+- **导出**：明细 CSV / 缺失设备 CSV / 缺失卡号 CSV（UTF-8-BOM）
+- **版本更新**：右上角按钮检查更新，Gitee 优先、GitHub 回退
+- 串口原始数据自动存档到 exe 旁 `serial_log\` 目录
+
+## 使用
+
+1. 下载 Release 中的 `SerialCardTool.exe`，双击运行（无需安装 Python）
+2. 配置区输入本次总数（如 500）与起始设备号（如 785000060001）
+3. 可选：导入卡号表（Excel/CSV）、粘贴需排除的 ICCID
+4. 连接串口，或打开/监听串口助手保存的日志文件
+5. 实时查看进度与明细，随时导出 CSV
+
+## 开发
+
+```
+运行：    python serial_card_tool.py
+回归测试：python test_regression.py <串口日志TXT> [池卡明细.xlsx]
+打包：    pyinstaller --onefile --windowed SerialCardTool.spec
+```
+
+依赖：Python 3.11+，tkinter、openpyxl、pyserial、pyinstaller
+
+## 版本
+
+- v1.0.0：首发。解析引擎（经 26621 行真实日志回归验证）、三数据源、进度看板、卡号匹配、CSV 导出、版本更新检查

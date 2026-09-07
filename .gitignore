@@ -1,0 +1,23 @@
+# 构建产物
+dist/
+build/
+__pycache__/
+*.pyc
+
+# 运行时数据（含真实生产数据，严禁入库）
+serial_log/
+device_iccid_table.*
+device_range_check.*
+device_card_detail.*
+device_card_table.*
+missing_cards.*
+bidirectional_check.*
+
+# 会话分析中间脚本（含本地客户文件路径）
+extract_pair.py
+merge_card.py
+missing_check.py
+bidir_check.py
+
+# 计划文档
+.trae/
