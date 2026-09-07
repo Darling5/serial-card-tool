@@ -22,3 +22,4 @@ bidir_check.py
 
 # 计划文档
 .trae/
+release_notes_*.md
