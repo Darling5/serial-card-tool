@@ -149,6 +149,18 @@ check("真实日志 imei 覆盖 ≥ 365", n_imei >= 365, "实际 %d" % n_imei)
 check("设字段后配对结果不变（369 条）",
       sum(1 for r in recs_f if r.iccid) == 369)
 
+# 8. 列删除持久化（重启后不得自动复活被删列）
+import types
+from serial_card_tool import App, COL_LABELS
+dummy = types.SimpleNamespace(custom_fields=["imei"])
+check("删列后加载不自动恢复",
+      App._merge_order(dummy, ["dev", "iccid", "imei"]) == ["dev", "iccid", "imei"])
+check("空/无效序列回退默认列",
+      App._merge_order(dummy, []) == ["idx", "ts", "dev", "iccid", "card", "imei", "status"])
+check("重复与无效项过滤",
+      App._merge_order(dummy, ["dev", "dev", "nope", "ts"]) == ["dev", "ts"])
+check("卡号列名已简化", COL_LABELS["card"] == "卡号")
+
 print()
 print("结果：%s（%d 项失败）" % ("全部通过" if fails == 0 else "存在失败", fails))
 sys.exit(1 if fails else 0)

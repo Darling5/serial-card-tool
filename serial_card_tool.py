@@ -35,7 +35,7 @@ GITHUB_REPO = "darling5/serial-card-tool"
 RESERVED_FIELDS = {"idx", "ts", "dev", "iccid", "card", "status", "device_num"}
 FIXED_COLS = ["idx", "ts", "dev", "iccid", "card", "status"]
 COL_LABELS = {"idx": "序号", "ts": "时间", "dev": "cur device_num", "iccid": "iccid",
-              "card": "卡号(144)", "status": "状态"}
+              "card": "卡号", "status": "状态"}
 COL_WIDTHS = {"idx": 50, "ts": 90, "dev": 130, "iccid": 190, "card": 130, "status": 130}
 
 # 打包后 __file__ 指向临时解压目录，存档须落在 exe 旁边
@@ -495,7 +495,7 @@ class FieldSettingsDialog(tk.Toplevel):
         ttk.Button(row, text="添加", width=6, command=self._add_field).pack(side="left", padx=(0, 4))
         ttk.Button(row, text="删除", width=6, command=self._del_field).pack(side="left")
 
-        right = ttk.LabelFrame(body, text=" 表格列顺序（选中后上移/下移） ", padding=8)
+        right = ttk.LabelFrame(body, text=" 表格列顺序（上移/下移/删除列） ", padding=8)
         right.grid(row=0, column=1, sticky="nsew")
         self.col_list = tk.Listbox(right, width=30, height=12, exportselection=False)
         self.col_list.pack(fill="both", expand=True)
@@ -504,11 +504,15 @@ class FieldSettingsDialog(tk.Toplevel):
         ttk.Button(row, text="上移", width=6,
                    command=lambda: self._move(-1)).pack(side="left", padx=(0, 4))
         ttk.Button(row, text="下移", width=6,
-                   command=lambda: self._move(1)).pack(side="left")
+                   command=lambda: self._move(1)).pack(side="left", padx=(0, 4))
+        ttk.Button(row, text="删除列", width=8,
+                   command=self._del_col).pack(side="left")
         self._refresh_cols()
 
         btns = ttk.Frame(body)
         btns.grid(row=1, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="恢复默认列",
+                   command=self._reset_default).pack(side="left", padx=4)
         ttk.Button(btns, text="应用", command=self._apply).pack(side="left", padx=4)
         ttk.Button(btns, text="取消", command=self.destroy).pack(side="left")
 
@@ -566,11 +570,33 @@ class FieldSettingsDialog(tk.Toplevel):
         self.col_list.selection_set(j)
         self.col_list.see(j)
 
+    def _del_col(self):
+        sel = self.col_list.curselection()
+        if not sel:
+            return
+        if len(self._order) <= 1:
+            messagebox.showwarning("提示", "至少需要保留一列", parent=self)
+            return
+        i = sel[0]
+        key = self._order.pop(i)
+        if key in self._fields:
+            self._fields.remove(key)
+            self.field_list.delete(0, "end")
+            for f in self._fields:
+                self.field_list.insert("end", f)
+        self._refresh_cols()
+        if self._order:
+            j = min(i, len(self._order) - 1)
+            self.col_list.selection_set(j)
+            self.col_list.see(j)
+
+    def _reset_default(self):
+        self._order = ["idx", "ts", "dev", "iccid", "card"] + self._fields + ["status"]
+        self._refresh_cols()
+
     def _apply(self):
-        valid = set(FIXED_COLS) | set(self._fields)
-        for k in valid:
-            if k not in self._order:
-                self._order.append(k)
+        if not self._order:
+            self._order = ["idx", "ts", "dev", "iccid", "card"] + self._fields + ["status"]
         save_config(self._fields, self._order)
         self.app._apply_field_settings(self._fields, self._order)
         self.destroy()
@@ -883,9 +909,13 @@ class App:
 
     def _merge_order(self, saved):
         valid = set(FIXED_COLS) | set(self.custom_fields)
-        order = [k for k in saved if k in valid]
-        default = ["idx", "ts", "dev", "iccid", "card"] + self.custom_fields + ["status"]
-        order += [k for k in default if k not in order]
+        order, seen = [], set()
+        for k in saved:
+            if k in valid and k not in seen:
+                order.append(k)
+                seen.add(k)
+        if not order:
+            order = ["idx", "ts", "dev", "iccid", "card"] + self.custom_fields + ["status"]
         return order
 
     def _open_field_settings(self):
