@@ -161,6 +161,19 @@ check("重复与无效项过滤",
       App._merge_order(dummy, ["dev", "dev", "nope", "ts"]) == ["dev", "ts"])
 check("卡号列名已简化", COL_LABELS["card"] == "卡号")
 
+# 9. 起始设备号自动推断（未填时不丢统计）
+check("推断：最常见位长的最小值",
+      App._infer_start({"785000060003", "785000060001", "785000060002"}) == 785000060001)
+check("推断：忽略非数字/异常位长",
+      App._infer_start({"785000060002", "78", "ab", ""}) == 785000060002)
+check("推断：空集返回 0", App._infer_start(set()) == 0)
+check("推断：真实日志起始 = 785000060001",
+      App._infer_start({r.dev for r in recs}) == 785000060001)
+_devs_all = {r.dev for r in recs}
+_start_infer = App._infer_start(_devs_all)
+check("推断 + 缺失统计与显式填写一致（129）",
+      sum(1 for d in range(_start_infer, _start_infer + 500) if str(d) not in _devs_all) == 129)
+
 print()
 print("结果：%s（%d 项失败）" % ("全部通过" if fails == 0 else "存在失败", fails))
 sys.exit(1 if fails else 0)

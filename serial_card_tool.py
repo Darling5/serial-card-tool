@@ -18,6 +18,7 @@ import time
 import tkinter as tk
 import urllib.request
 import webbrowser
+from collections import Counter
 from tkinter import ttk, filedialog, messagebox
 
 import openpyxl
@@ -28,7 +29,7 @@ try:
 except ImportError:
     serial = None
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.2"
 GITEE_REPO = "darling5/serial-card-tool"
 GITHUB_REPO = "darling5/serial-card-tool"
 
@@ -1011,6 +1012,15 @@ class App:
                 vals.append(v if v != "" else "—")
             self.tree.insert("", "end", iid=str(n), tags=(tag,), values=vals)
 
+    @staticmethod
+    def _infer_start(devs):
+        """从已解析设备号推断起始设备号：取最常见位长中的最小值。"""
+        digits = [d for d in devs if d and d.isdigit()]
+        if not digits:
+            return 0
+        common_len = Counter(len(d) for d in digits).most_common(1)[0][0]
+        return min(int(d) for d in digits if len(d) == common_len)
+
     def _update_stats(self):
         recs = self.engine.records()
         devs = {}
@@ -1039,13 +1049,21 @@ class App:
         self.stat_vars["swap"].set(str(swap))
         self.stat_vars["nonpool"].set(str(len(nonpool)))
 
+        start_auto = False
         try:
             start = int(self.start_var.get())
         except ValueError:
             start = 0
+        if not start and devs:
+            start = self._infer_start(devs)
+            if start:
+                self.start_var.set(str(start))
+                start_auto = True
         if start and total:
             miss_d = sum(1 for d in range(start, start + total) if str(d) not in devs)
             self.stat_vars["missing_dev"].set(str(miss_d))
+            if start_auto:
+                self._status_text = "已自动记录起始设备号 %d（可手动修改）" % start
         else:
             self.stat_vars["missing_dev"].set("—")
         if self.card_map:
@@ -1083,15 +1101,21 @@ class App:
 
     def _export_missing_devices(self):
         try:
-            start = int(self.start_var.get())
             total = int(self.total_var.get())
         except ValueError:
-            messagebox.showwarning("提示", "起始设备号或本次总数无效")
-            return
-        if not start or not total:
-            messagebox.showwarning("提示", "起始设备号或本次总数无效")
-            return
+            total = 0
+        try:
+            start = int(self.start_var.get())
+        except ValueError:
+            start = 0
         devs = {r.dev for r in self.engine.records()}
+        if not start:
+            start = self._infer_start(devs)
+            if start:
+                self.start_var.set(str(start))
+        if not start or not total:
+            messagebox.showwarning("提示", "起始设备号或本次总数无效，且无法从已解析数据推断")
+            return
         missing = [d for d in range(start, start + total) if str(d) not in devs]
         path = self._export_path("缺失设备.csv")
         if not path:
